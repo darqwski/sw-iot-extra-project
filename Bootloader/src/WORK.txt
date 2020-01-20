@@ -1,0 +1,176 @@
+/**
+  ******************************************************************************
+  * @file    main.c
+  * @author  Ac6
+  * @version V1.0
+  * @date    01-December-2013
+  * @brief   Default main function.
+  ******************************************************************************
+*/
+
+
+#include "stm32f10x.h"
+#include "stm32f1xx_nucleo.h"
+#include "help_library.h"
+/*Flash unlocking*/
+#define FLASH_KEY1      ((uint32_t)0x45670123)
+#define FLASH_KEY2      ((uint32_t)0xCDEF89AB)
+/* First page address */
+#define Start_Page        		0x0800C000
+/* Application start address */
+#define APPLICATION_ADDRESS     0x0800C000
+#define CONFIGURATION_ADDRES	0x08001800
+/*Define last page and get byters*/
+const volatile uint8_t *userConfig=(const volatile uint8_t *)CONFIGURATION_ADDRES;
+typedef enum {FALSE, TRUE} boolean;
+typedef void (*pFunction)(void);
+const int flash_page_size = 2048;
+
+char read_bufor [2048];
+int read_bufor_length=0;
+int page_number = 0;
+char stringi[4];
+boolean sth_went = FALSE;
+boolean checkFirmwareUpdate(){
+	if(userConfig[0] == 0xFF)
+		return TRUE;
+	return FALSE;
+}
+void unlock_flash(uint32_t ADDRES){
+	FLASH->KEYR = FLASH_KEY1;
+	FLASH->KEYR = FLASH_KEY2;
+	while((FLASH->SR&FLASH_SR_BSY));
+	FLASH->CR |= FLASH_CR_PER;
+	FLASH->AR = ADDRES;
+	FLASH->CR |= FLASH_CR_STRT;
+	while((FLASH->SR&FLASH_SR_BSY));
+	FLASH->CR &= ~FLASH_CR_PER;
+	FLASH->CR |= FLASH_CR_PG;
+}
+void lock_flash(){
+	FLASH->CR &= ~FLASH_CR_PG;
+	FLASH->CR |= FLASH_CR_LOCK;
+}
+boolean performFirmwareUpdate(){
+	set_pin_on(PIN_C,PIN_8);
+
+	set_usart2();
+	while(TRUE){
+		if (GPIO_ReadInputDataBit(GPIOC, GPIO_Pin_13) == 0){
+			unlock_flash(CONFIGURATION_ADDRES);
+			while((FLASH->SR&FLASH_SR_BSY));
+			 *(__IO uint16_t*)(CONFIGURATION_ADDRES) = 0x00;
+			lock_flash();
+			return FALSE;
+		}
+		if (USART_GetFlagStatus(USART2, USART_FLAG_RXNE)) {
+			sth_went=TRUE; //READING BYTE FROM USART2
+			read_bufor[read_bufor_length++] = USART_ReceiveData(USART2);
+			if(read_bufor_length%1000==0)
+			{
+			set_pin_on(PIN_C,PIN_8);
+			}
+			else if(read_bufor_length%1000==500)
+			{
+			set_pin_off(PIN_C,PIN_8);
+			}
+
+			timer_ms = 2000;
+
+		}
+
+		if(read_bufor_length%flash_page_size == 0&&sth_went){							/*Saving full pages*/
+				unlock_flash(Start_Page+flash_page_size*page_number);
+				for(int i=0; i<flash_page_size;  i+=2)
+				{
+				while((FLASH->SR&FLASH_SR_BSY));
+				*(__IO uint16_t*)(Start_Page+flash_page_size*page_number + i)=read_bufor[flash_page_size*page_number+i] | (read_bufor[flash_page_size*page_number+i+1]<<8);
+				}
+				lock_flash();
+				page_number++;
+
+				send_string("saved 1024 bytes\n");
+
+		}
+		else if(sth_went == TRUE&&timer_ms == 0){
+
+
+					/*Saving last page pages*/
+					unlock_flash(Start_Page+flash_page_size*page_number);
+					for(int i=page_number*flash_page_size; i<read_bufor_length;  i+=2)
+					{
+					while((FLASH->SR&FLASH_SR_BSY));
+					*(__IO uint16_t*)(Start_Page+ i)=read_bufor[i] | (read_bufor[i+1]<<8);
+					}
+					lock_flash();
+					send_string("saved ");
+					itoa(read_bufor_length,stringi,10);
+					send_string(stringi);
+					send_string(" bytes \n");
+					send_string("DONE!");
+
+
+					/*Change flag when software is updated*/
+
+					unlock_flash(CONFIGURATION_ADDRES);
+					while((FLASH->SR&FLASH_SR_BSY));
+					 *(__IO uint16_t*)(CONFIGURATION_ADDRES) = 0x00;
+					lock_flash();
+
+					 return TRUE;
+			}
+
+	}
+	return FALSE;
+
+}
+
+
+typedef void (*pFunction)(void);
+
+/**
+**===========================================================================
+**  Abstract: Bootloader
+**===========================================================================
+*/
+
+int boot_main(void)
+{
+	set_delay();
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_GPIOC | RCC_APB2Periph_GPIOD, ENABLE);
+	SysTick_Config(SystemCoreClock / 1000);
+		set_pin_out(PIN_C,PIN_8);
+		set_pin_on(PIN_C,PIN_8);
+
+	pFunction appEntry;
+	uint32_t appStack;
+	/* check update*/
+	//if(checkFirmwareUpdate())
+		performFirmwareUpdate();
+
+
+
+	/* Get the application stack pointer (First entry in the application vector table) */
+	appStack = (uint32_t) *((__IO uint32_t*)APPLICATION_ADDRESS);
+
+	/* Get the application entry point (Second entry in the application vector table) */
+	appEntry = (pFunction) *(__IO uint32_t*) (APPLICATION_ADDRESS + 4);
+
+	/* Reconfigure vector table offset register to match the application location */
+	set_pin_off(PIN_C,PIN_8);
+	SCB->VTOR = APPLICATION_ADDRESS;
+
+	/* Set the application stack pointer */
+	__set_MSP(appStack);
+
+	/* Start the application */
+	//
+
+	appEntry();
+
+	while(1);
+
+}
+
+
+
